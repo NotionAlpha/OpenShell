@@ -8,6 +8,7 @@ import json
 import os
 import pathlib
 import sys
+import threading
 import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
@@ -54,6 +55,34 @@ class ExecResult:
     stderr: str
 
 
+class ExecHandle:
+    """Handle returned by :meth:`SandboxSession.exec_detached`.
+
+    Encapsulates the daemon thread that holds the blocking exec call for the
+    lifetime of the sandbox. Callers can poll :attr:`is_alive` and
+    :attr:`error` from any thread; reads are safe under the GIL because
+    Python attribute assignment is atomic.
+    """
+
+    def __init__(self, thread: threading.Thread) -> None:
+        self._thread = thread
+        self._error: BaseException | None = None
+
+    @property
+    def is_alive(self) -> bool:
+        """Return whether the daemon thread is still running."""
+        return self._thread.is_alive()
+
+    @property
+    def error(self) -> BaseException | None:
+        """Return the most recent exception raised by the exec call, or None."""
+        return self._error
+
+    def join(self, timeout: float | None = None) -> None:
+        """Wait for the daemon thread to finish (mirrors :meth:`threading.Thread.join`)."""
+        self._thread.join(timeout=timeout)
+
+
 class SandboxError(RuntimeError):
     pass
 
@@ -86,6 +115,59 @@ class SandboxSession:
             stdin=stdin,
             timeout_seconds=timeout_seconds,
         )
+
+    def exec_detached(
+        self,
+        command: Sequence[str],
+        *,
+        env: Mapping[str, str] | None = None,
+        workdir: str | None = None,
+    ) -> ExecHandle:
+        """Start `command` inside the sandbox in a daemon thread and return immediately.
+
+        Unlike :meth:`exec`, this does not block. The command runs for the
+        lifetime of the sandbox (or until it exits on its own); when the
+        underlying sandbox is deleted, the exec stream closes and the daemon
+        thread exits.
+
+        The returned :class:`ExecHandle` exposes:
+
+        - ``is_alive: bool`` — whether the daemon thread is still running.
+        - ``error: BaseException | None`` — the most recent exception raised
+          by the underlying exec call (or ``None`` if it has not raised).
+          Useful for readiness probes that want to surface the root cause when
+          the background process fails to come up.
+
+        Concurrency: the handle's ``error`` is set by the daemon thread and
+        read by the main thread; reads are safe because Python attribute
+        assignments are atomic under the GIL.
+        """
+        sandbox_id = self.sandbox.id
+        sandbox_name = self.sandbox.name
+        client = self._client
+        cmd = list(command)
+        env_dict = dict(env or {})
+        wd = workdir
+
+        # Allocate the handle before the thread so we can set _error on it.
+        handle: ExecHandle = object.__new__(ExecHandle)
+        handle._error = None  # type: ignore[attr-defined]
+
+        def _target() -> None:
+            run = getattr(client, "exec")
+            try:
+                run(sandbox_id, cmd, workdir=wd, env=env_dict, stream_output=False)
+            except BaseException as exc:  # noqa: BLE001
+                handle._error = exc  # type: ignore[attr-defined]
+
+        thread = threading.Thread(
+            target=_target,
+            name=f"openshell-exec[{sandbox_name}]",
+            daemon=True,
+        )
+        handle._thread = thread  # type: ignore[attr-defined]
+        thread.start()
+        return handle
 
     def exec_python(
         self,
@@ -573,6 +655,17 @@ class Sandbox:
             stdin=stdin,
             timeout_seconds=timeout_seconds,
         )
+
+    def exec_detached(
+        self,
+        command: Sequence[str],
+        *,
+        env: Mapping[str, str] | None = None,
+        workdir: str | None = None,
+    ) -> ExecHandle:
+        if self._session is None:
+            raise SandboxError("sandbox context has not been entered")
+        return self._session.exec_detached(command, env=env, workdir=workdir)
 
     def exec_python(
         self,

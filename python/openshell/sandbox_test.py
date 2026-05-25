@@ -233,3 +233,163 @@ def test_inference_set_cluster_forwards_no_verify_flag() -> None:
 
     assert stub.request is not None
     assert stub.request.no_verify is True
+
+
+# ---------------------------------------------------------------------------
+# exec_detached tests (Fix 4)
+# ---------------------------------------------------------------------------
+
+import threading
+import time as _time
+
+import pytest
+
+
+class _BlockingExecStub:
+    """Fake ExecSandbox stub that blocks until an event is set."""
+
+    def __init__(self, block_event: threading.Event, delay: float = 0.0) -> None:
+        self._block_event = block_event
+        self._delay = delay
+        self.request: openshell_pb2.ExecSandboxRequest | None = None
+
+    def ExecSandbox(
+        self,
+        request: openshell_pb2.ExecSandboxRequest,
+        timeout: float | None = None,
+    ):
+        self.request = request
+        _ = timeout
+        self._block_event.wait()
+        if self._delay:
+            _time.sleep(self._delay)
+        yield openshell_pb2.ExecSandboxEvent(
+            exit=openshell_pb2.ExecSandboxExit(exit_code=0)
+        )
+
+
+class _ErrorExecStub:
+    """Fake ExecSandbox stub that raises an exception."""
+
+    def __init__(self, exc: BaseException) -> None:
+        self._exc = exc
+        self.request: openshell_pb2.ExecSandboxRequest | None = None
+
+    def ExecSandbox(
+        self,
+        request: openshell_pb2.ExecSandboxRequest,
+        timeout: float | None = None,
+    ):
+        self.request = request
+        _ = timeout
+        raise self._exc
+        yield  # make it a generator
+
+
+def _client_with_stub(stub: Any) -> SandboxClient:
+    client = cast("SandboxClient", object.__new__(SandboxClient))
+    client._timeout = 30.0
+    client._stub = cast("Any", stub)
+    return client
+
+
+def test_session_exec_detached_returns_immediately() -> None:
+    """exec_detached should return in well under the blocking time (~2 s)."""
+    from openshell.sandbox import ExecHandle, SandboxSession
+
+    block_event = threading.Event()
+    stub = _BlockingExecStub(block_event)
+    client = _client_with_stub(stub)
+    ref = _make_sandbox_ref()
+    session = SandboxSession(client, ref)
+
+    start = _time.monotonic()
+    handle = session.exec_detached(["sleep", "1"])
+    elapsed = _time.monotonic() - start
+
+    # Should return well before the 2-second block expires
+    assert elapsed < 0.15, f"exec_detached blocked for {elapsed:.3f}s — expected <0.15s"
+    assert isinstance(handle, ExecHandle)
+
+    # Clean up: unblock the daemon thread so it can exit
+    block_event.set()
+    handle.join(timeout=2.0)
+
+
+def test_session_exec_detached_passes_command_and_env() -> None:
+    """exec_detached must forward command, env, and sandbox_id to ExecSandbox."""
+    from openshell.sandbox import ExecHandle, SandboxSession
+
+    block_event = threading.Event()
+    stub = _BlockingExecStub(block_event)
+    client = _client_with_stub(stub)
+    ref = _make_sandbox_ref(name="swift-koala", uid="uid-42")
+    session = SandboxSession(client, ref)
+
+    handle = session.exec_detached(["python", "/app/agent.py"], env={"FOO": "bar"})
+
+    # Give the daemon thread a moment to call ExecSandbox
+    deadline = _time.monotonic() + 1.0
+    while stub.request is None and _time.monotonic() < deadline:
+        _time.sleep(0.01)
+
+    assert stub.request is not None
+    assert list(stub.request.command) == ["python", "/app/agent.py"]
+    assert dict(stub.request.environment) == {"FOO": "bar"}
+    assert stub.request.sandbox_id == "uid-42"  # exec uses id, not name
+
+    block_event.set()
+    handle.join(timeout=2.0)
+
+
+def test_session_exec_detached_captures_exception_into_handle_error() -> None:
+    """If the underlying exec raises, ExecHandle.error should hold the exception."""
+    import grpc
+
+    from openshell.sandbox import ExecHandle, SandboxSession
+
+    exc = grpc.RpcError()
+    stub = _ErrorExecStub(exc)
+    client = _client_with_stub(stub)
+    ref = _make_sandbox_ref()
+    session = SandboxSession(client, ref)
+
+    handle = session.exec_detached(["python", "/app/agent.py"])
+    handle.join(timeout=1.0)
+
+    assert handle.is_alive is False
+    assert handle.error is exc
+
+
+def test_session_exec_detached_handle_is_alive_while_running() -> None:
+    """is_alive is True while the daemon thread is blocked; False after it exits."""
+    from openshell.sandbox import ExecHandle, SandboxSession
+
+    block_event = threading.Event()
+    stub = _BlockingExecStub(block_event)
+    client = _client_with_stub(stub)
+    ref = _make_sandbox_ref()
+    session = SandboxSession(client, ref)
+
+    handle = session.exec_detached(["sleep", "forever"])
+
+    # Give the thread a moment to start and enter the blocking wait
+    deadline = _time.monotonic() + 1.0
+    while not handle.is_alive and _time.monotonic() < deadline:
+        _time.sleep(0.01)
+
+    assert handle.is_alive is True
+
+    block_event.set()
+    handle.join(timeout=2.0)
+
+    assert handle.is_alive is False
+
+
+def test_sandbox_exec_detached_raises_when_not_entered() -> None:
+    """Sandbox.exec_detached must raise SandboxError before context entry."""
+    from openshell.sandbox import Sandbox, SandboxError
+
+    sb = Sandbox()
+    with pytest.raises(SandboxError, match="context has not been entered"):
+        sb.exec_detached(["python", "/app/agent.py"])

@@ -8,6 +8,7 @@ from __future__ import annotations
 from .sandbox import (
     ClusterInferenceConfig,
     ExecChunk,
+    ExecHandle,
     ExecResult,
     InferenceRouteClient,
     Sandbox,
@@ -30,6 +31,7 @@ except Exception:
 __all__ = [
     "ClusterInferenceConfig",
     "ExecChunk",
+    "ExecHandle",
     "ExecResult",
     "InferenceRouteClient",
     "Sandbox",
