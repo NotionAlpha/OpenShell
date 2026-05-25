@@ -216,6 +216,36 @@ depends = ["python:proto"]
 run = "uv run ty check {{vars.python_paths}}"
 hide = true
 
+["python:wheel:verify"]
+description = "Assert the built wheel contains the generated _pb2 proto stubs"
+depends = ["build:python:wheel"]
+run = '''
+#!/usr/bin/env bash
+set -euo pipefail
+WHEEL_DIR="${WHEEL_DIR:-target/wheels}"
+WHEEL=$(ls "$WHEEL_DIR"/openshell-*-*.whl 2>/dev/null | head -1)
+if [ -z "$WHEEL" ]; then
+  echo "no wheel found in $WHEEL_DIR" >&2
+  exit 1
+fi
+echo "verifying wheel contents: $WHEEL"
+MISSING=0
+for stub in datamodel_pb2 openshell_pb2 sandbox_pb2 inference_pb2; do
+  for ext in .py .pyi _grpc.py; do
+    if ! unzip -l "$WHEEL" | grep -qF "openshell/_proto/${stub}${ext}"; then
+      echo "MISSING: openshell/_proto/${stub}${ext}" >&2
+      MISSING=$((MISSING + 1))
+    fi
+  done
+done
+if [ "$MISSING" -gt 0 ]; then
+  echo "wheel is missing $MISSING proto stub file(s)" >&2
+  exit 1
+fi
+echo "OK: all 12 proto stub files present in $WHEEL"
+'''
+hide = false
+
 ["python:proto"]
 description = "Generate Python protobuf stubs from .proto files"
 env = { UV_NO_SYNC = "1" }

@@ -72,6 +72,11 @@ bindings = "bin"
 manifest-path = "crates/openshell-cli/Cargo.toml"
 python-source = "python"
 module-name = "openshell"
+include = [
+    { path = "python/openshell/_proto/*_pb2.py", format = "wheel" },
+    { path = "python/openshell/_proto/*_pb2_grpc.py", format = "wheel" },
+    { path = "python/openshell/_proto/*_pb2.pyi", format = "wheel" },
+]
 
 [tool.ruff]
 target-version = "py312"
