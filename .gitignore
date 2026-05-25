@@ -95,9 +95,15 @@ dmypy.json
 # Cython debug symbols
 cython_debug/
 
-# Generated Python protobuf stubs (keep package marker)
-python/openshell/_proto/*
+# Generated Python protobuf stubs — keep the package marker and all generated
+# files so that `maturin build` can include them in the wheel (maturin's file
+# walker uses the `ignore` crate which respects gitignore; files excluded here
+# cannot be re-included via [tool.maturin].include).
+python/openshell/_proto/__pycache__/
 !python/openshell/_proto/__init__.py
+!python/openshell/_proto/*_pb2.py
+!python/openshell/_proto/*_pb2.pyi
+!python/openshell/_proto/*_pb2_grpc.py
 
 # =============================================================================
 # IDE / Editor
