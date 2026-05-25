@@ -19,6 +19,7 @@ from .sandbox import (
     TlsConfig,
 )
 
+from ._http import http_client_for_sandbox  # noqa: F401
 from ._proto import sandbox_pb2, openshell_pb2, datamodel_pb2  # noqa: F401
 from .policy import policy_from_network_allow  # noqa: F401
 
@@ -45,5 +46,6 @@ __all__ = [
     "sandbox_pb2",
     "openshell_pb2",
     "datamodel_pb2",
+    "http_client_for_sandbox",
     "policy_from_network_allow",
 ]
