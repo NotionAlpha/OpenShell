@@ -574,6 +574,8 @@ class Sandbox:
         spec: openshell_pb2.SandboxSpec | None = None,
         timeout: float = 30.0,
         ready_timeout_seconds: float = 120.0,
+        start_command: Sequence[str] | None = None,
+        start_env: Mapping[str, str] | None = None,
     ) -> None:
         self._cluster = cluster
         self._sandbox_input = sandbox
@@ -581,6 +583,9 @@ class Sandbox:
         self._spec = spec
         self._timeout = timeout
         self._ready_timeout_seconds = ready_timeout_seconds
+        self._start_command = start_command
+        self._start_env = start_env
+        self._start_handle: ExecHandle | None = None
         self._client: SandboxClient | None = None
         self._session: SandboxSession | None = None
 
@@ -595,6 +600,11 @@ class Sandbox:
         if self._session is None:
             raise SandboxError("sandbox context has not been entered")
         return self._session.sandbox
+
+    @property
+    def start_handle(self) -> ExecHandle | None:
+        """The ExecHandle for the auto-launched start_command, if any."""
+        return self._start_handle
 
     def __enter__(self) -> Sandbox:
         client = SandboxClient.from_active_cluster(
@@ -615,6 +625,12 @@ class Sandbox:
             timeout_seconds=self._ready_timeout_seconds,
         )
         self._session = SandboxSession(client, ready)
+
+        if self._start_command is not None:
+            self._start_handle = self._session.exec_detached(
+                self._start_command,
+                env=self._start_env,
+            )
 
         return self
 

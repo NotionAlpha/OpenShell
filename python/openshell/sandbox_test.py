@@ -6,7 +6,7 @@ from __future__ import annotations
 import json
 from typing import TYPE_CHECKING, Any, cast
 
-from openshell._proto import openshell_pb2
+from openshell._proto import datamodel_pb2, openshell_pb2
 from openshell.sandbox import (
     _PYTHON_CLOUDPICKLE_BOOTSTRAP,
     _SANDBOX_PYTHON_BIN,
@@ -463,3 +463,221 @@ def test_from_active_cluster_raises_sandbox_error_on_missing_metadata(
     assert "metadata.json" in str(err)
     # Verify the FileNotFoundError is chained
     assert isinstance(err.__cause__, FileNotFoundError)
+
+
+# ---------------------------------------------------------------------------
+# Sandbox(start_command=, start_env=) convenience kwargs tests (Fix 8)
+# ---------------------------------------------------------------------------
+
+
+class _SandboxContextStub:
+    """Fake stub that supports CreateSandbox, GetSandbox, and ExecSandbox.
+
+    Used to exercise the full Sandbox.__enter__ path with start_command.
+    ExecSandbox blocks until `exec_event` is set so the daemon thread stays
+    alive during assertions.
+    """
+
+    def __init__(
+        self,
+        exec_event: threading.Event | None = None,
+        exec_exc: BaseException | None = None,
+    ) -> None:
+        self._exec_event = exec_event or threading.Event()
+        self._exec_exc = exec_exc
+        self.exec_requests: list[openshell_pb2.ExecSandboxRequest] = []
+        self._sandbox_name = "agent-koala"
+        self._sandbox_id = "uid-sc-1"
+
+    # ------------------------------------------------------------------
+    # gRPC stub methods called by SandboxClient
+    # ------------------------------------------------------------------
+
+    def CreateSandbox(
+        self,
+        request: openshell_pb2.CreateSandboxRequest,
+        timeout: float | None = None,
+    ) -> openshell_pb2.SandboxResponse:
+        _ = request, timeout
+        meta = datamodel_pb2.ObjectMeta(
+            id=self._sandbox_id,
+            name=self._sandbox_name,
+        )
+        sandbox = openshell_pb2.Sandbox(
+            metadata=meta,
+            phase=openshell_pb2.SANDBOX_PHASE_PROVISIONING,
+        )
+        return openshell_pb2.SandboxResponse(sandbox=sandbox)
+
+    def GetSandbox(
+        self,
+        request: openshell_pb2.GetSandboxRequest,
+        timeout: float | None = None,
+    ) -> openshell_pb2.SandboxResponse:
+        _ = request, timeout
+        meta = datamodel_pb2.ObjectMeta(
+            id=self._sandbox_id,
+            name=self._sandbox_name,
+        )
+        sandbox = openshell_pb2.Sandbox(
+            metadata=meta,
+            phase=openshell_pb2.SANDBOX_PHASE_READY,
+        )
+        return openshell_pb2.SandboxResponse(sandbox=sandbox)
+
+    def DeleteSandbox(
+        self,
+        request: openshell_pb2.DeleteSandboxRequest,
+        timeout: float | None = None,
+    ) -> openshell_pb2.DeleteSandboxResponse:
+        _ = request, timeout
+        return openshell_pb2.DeleteSandboxResponse(deleted=True)
+
+    def ExecSandbox(
+        self,
+        request: openshell_pb2.ExecSandboxRequest,
+        timeout: float | None = None,
+    ):
+        self.exec_requests.append(request)
+        _ = timeout
+        if self._exec_exc is not None:
+            raise self._exec_exc
+        self._exec_event.wait()
+        yield openshell_pb2.ExecSandboxEvent(
+            exit=openshell_pb2.ExecSandboxExit(exit_code=0)
+        )
+
+
+def _make_sandbox_with_stub(
+    stub: _SandboxContextStub,
+    monkeypatch: Any,
+    **sandbox_kwargs: Any,
+) -> "Any":
+    """Return a Sandbox configured to use the given stub without needing a real cluster."""
+    from openshell.sandbox import Sandbox, SandboxClient
+
+    # Patch from_active_cluster to return a client backed by the fake stub
+    def _fake_from_active_cluster(
+        *,
+        cluster: str | None = None,
+        timeout: float = 30.0,
+    ) -> SandboxClient:
+        class _FakeChannel:
+            def close(self) -> None:
+                pass
+
+        client = cast("SandboxClient", object.__new__(SandboxClient))
+        client._timeout = timeout
+        client._stub = cast("Any", stub)
+        client._endpoint = "fake:50051"
+        client._cluster_name = "fake-cluster"
+        client._channel = cast("Any", _FakeChannel())
+        return client
+
+    monkeypatch.setattr(SandboxClient, "from_active_cluster", staticmethod(_fake_from_active_cluster))
+
+    return Sandbox(**sandbox_kwargs)
+
+
+def test_sandbox_with_start_command_launches_exec_detached_after_wait_ready(
+    monkeypatch: Any,
+) -> None:
+    """Sandbox.__enter__ should call exec_detached with start_command/start_env after wait_ready."""
+    from openshell.sandbox import ExecHandle
+
+    exec_event = threading.Event()
+    stub = _SandboxContextStub(exec_event=exec_event)
+
+    sb = _make_sandbox_with_stub(
+        stub,
+        monkeypatch,
+        start_command=["python", "/app/agent.py"],
+        start_env={"FOO": "bar"},
+        delete_on_exit=False,
+    )
+
+    with sb:
+        # Give the daemon thread a moment to call ExecSandbox
+        deadline = _time.monotonic() + 1.0
+        while len(stub.exec_requests) == 0 and _time.monotonic() < deadline:
+            _time.sleep(0.01)
+
+        assert sb.start_handle is not None
+        assert sb.start_handle.is_alive is True
+
+        req = stub.exec_requests[0]
+        assert list(req.command) == ["python", "/app/agent.py"]
+        assert dict(req.environment) == {"FOO": "bar"}
+
+    exec_event.set()
+    if sb.start_handle is not None:
+        sb.start_handle.join(timeout=2.0)
+
+
+def test_sandbox_without_start_command_does_not_launch(
+    monkeypatch: Any,
+) -> None:
+    """Sandbox.__enter__ must NOT call ExecSandbox when no start_command is given."""
+    exec_event = threading.Event()
+    stub = _SandboxContextStub(exec_event=exec_event)
+
+    sb = _make_sandbox_with_stub(
+        stub,
+        monkeypatch,
+        delete_on_exit=False,
+    )
+
+    with sb:
+        _time.sleep(0.05)  # brief pause — confirm no exec was triggered
+        assert sb.start_handle is None
+        assert len(stub.exec_requests) == 0
+
+    exec_event.set()
+
+
+def test_sandbox_start_command_error_surfaces_via_handle_error(
+    monkeypatch: Any,
+) -> None:
+    """If ExecSandbox raises immediately, __enter__ still returns and start_handle.error holds the exception."""
+    exc = RuntimeError("agent crashed at startup")
+    stub = _SandboxContextStub(exec_exc=exc)
+
+    sb = _make_sandbox_with_stub(
+        stub,
+        monkeypatch,
+        start_command=["python", "/app/agent.py"],
+        delete_on_exit=False,
+    )
+
+    with sb:
+        assert sb.start_handle is not None
+        sb.start_handle.join(timeout=2.0)
+        assert sb.start_handle.error is exc
+
+
+def test_sandbox_start_command_with_default_env(
+    monkeypatch: Any,
+) -> None:
+    """When start_env is omitted, ExecSandbox receives an empty environment map."""
+    exec_event = threading.Event()
+    stub = _SandboxContextStub(exec_event=exec_event)
+
+    sb = _make_sandbox_with_stub(
+        stub,
+        monkeypatch,
+        start_command=["echo", "hello"],
+        delete_on_exit=False,
+    )
+
+    with sb:
+        deadline = _time.monotonic() + 1.0
+        while len(stub.exec_requests) == 0 and _time.monotonic() < deadline:
+            _time.sleep(0.01)
+
+        req = stub.exec_requests[0]
+        assert list(req.command) == ["echo", "hello"]
+        assert dict(req.environment) == {}
+
+    exec_event.set()
+    if sb.start_handle is not None:
+        sb.start_handle.join(timeout=2.0)
