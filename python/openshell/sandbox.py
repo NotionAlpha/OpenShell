@@ -257,7 +257,13 @@ class SandboxClient:
             / cluster_name
             / "metadata.json"
         )
-        metadata = json.loads(metadata_path.read_text())
+        try:
+            metadata = json.loads(metadata_path.read_text())
+        except FileNotFoundError as exc:
+            raise SandboxError(
+                f"gateway {cluster_name!r} is not registered (looked for {metadata_path}). "
+                "Register with `openshell gateway add <name> <endpoint>`."
+            ) from exc
         parsed = urlparse(metadata["gateway_endpoint"])
         host = parsed.hostname or "127.0.0.1"
         port = parsed.port or (443 if parsed.scheme == "https" else 80)
@@ -757,7 +763,14 @@ def _resolve_active_cluster() -> str:
     if env_gateway:
         return env_gateway
     active_file = _xdg_config_home() / "openshell" / "active_gateway"
-    value = active_file.read_text().strip()
+    try:
+        value = active_file.read_text().strip()
+    except FileNotFoundError as exc:
+        raise SandboxError(
+            f"no active gateway configured (looked for {active_file}). "
+            "Register one with `openshell gateway add <name> <endpoint>` "
+            "or set $OPENSHELL_GATEWAY=<name>."
+        ) from exc
     if value == "":
         raise SandboxError("no active gateway configured")
     return value

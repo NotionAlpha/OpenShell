@@ -393,3 +393,73 @@ def test_sandbox_exec_detached_raises_when_not_entered() -> None:
     sb = Sandbox()
     with pytest.raises(SandboxError, match="context has not been entered"):
         sb.exec_detached(["python", "/app/agent.py"])
+
+
+# ---------------------------------------------------------------------------
+# gateway config error handling tests (Fix 7)
+# ---------------------------------------------------------------------------
+
+
+def test_resolve_active_cluster_raises_sandbox_error_on_missing_file(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    """_resolve_active_cluster should raise SandboxError with remediation hint when active_gateway is missing."""
+    from openshell.sandbox import SandboxError, _resolve_active_cluster
+
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+    monkeypatch.delenv("OPENSHELL_GATEWAY", raising=False)
+
+    with pytest.raises(SandboxError) as exc_info:
+        _resolve_active_cluster()
+
+    err = exc_info.value
+    assert "no active gateway configured" in str(err)
+    assert "openshell gateway add" in str(err)
+    assert str(tmp_path / "openshell" / "active_gateway") in str(err)
+    # Verify the FileNotFoundError is chained
+    assert isinstance(err.__cause__, FileNotFoundError)
+
+
+def test_resolve_active_cluster_uses_env_override_before_filesystem(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    """_resolve_active_cluster should use $OPENSHELL_GATEWAY env var and not access filesystem."""
+    from openshell.sandbox import _resolve_active_cluster
+
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+    # Do NOT create active_gateway file; filesystem is unavailable
+    monkeypatch.setenv("OPENSHELL_GATEWAY", "test-cluster")
+
+    result = _resolve_active_cluster()
+
+    assert result == "test-cluster"
+    # Verify active_gateway file was never created/accessed
+    assert not (tmp_path / "openshell" / "active_gateway").exists()
+
+
+def test_from_active_cluster_raises_sandbox_error_on_missing_metadata(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    """SandboxClient.from_active_cluster should raise SandboxError with remediation hint when gateway metadata is missing."""
+    from openshell.sandbox import SandboxClient, SandboxError
+
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+    monkeypatch.delenv("OPENSHELL_GATEWAY", raising=False)
+
+    # Set up: create active_gateway but NOT the gateway directory
+    (tmp_path / "openshell").mkdir()
+    (tmp_path / "openshell" / "active_gateway").write_text("test-cluster")
+
+    with pytest.raises(SandboxError) as exc_info:
+        SandboxClient.from_active_cluster()
+
+    err = exc_info.value
+    assert "test-cluster" in str(err)
+    assert "not registered" in str(err)
+    assert "openshell gateway add" in str(err)
+    assert "metadata.json" in str(err)
+    # Verify the FileNotFoundError is chained
+    assert isinstance(err.__cause__, FileNotFoundError)
