@@ -109,6 +109,28 @@ class SandboxSession:
             timeout_seconds=timeout_seconds,
         )
 
+    def expose_http(
+        self,
+        port: int,
+        *,
+        service_name: str = "http",
+        domain: bool = False,
+    ) -> str:
+        """Expose `port` inside the sandbox via the gateway and return the host-reachable URL.
+
+        The returned URL points at the gateway and routes traffic to `port` inside
+        the sandbox. The gateway terminates mTLS; clients reaching the URL should
+        use the gateway client cert (see `openshell.http_client_for_sandbox` if/when
+        that helper lands).
+        """
+        response = self._client.expose_service(
+            self.sandbox.name,
+            service_name=service_name,
+            target_port=port,
+            domain=domain,
+        )
+        return response.url
+
     def delete(self) -> bool:
         return self._client.delete(self.sandbox.name)
 
@@ -239,6 +261,24 @@ class SandboxClient:
             timeout=self._timeout,
         )
         return bool(response.deleted)
+
+    def expose_service(
+        self,
+        sandbox_name: str,
+        *,
+        service_name: str,
+        target_port: int,
+        domain: bool = False,
+    ) -> openshell_pb2.ServiceEndpointResponse:
+        return self._stub.ExposeService(
+            openshell_pb2.ExposeServiceRequest(
+                sandbox=sandbox_name,
+                service=service_name,
+                target_port=target_port,
+                domain=domain,
+            ),
+            timeout=self._timeout,
+        )
 
     def wait_deleted(self, sandbox_name: str, *, timeout_seconds: float = 60.0) -> None:
         deadline = time.time() + timeout_seconds
@@ -556,6 +596,17 @@ class Sandbox:
             env=env,
             timeout_seconds=timeout_seconds,
         )
+
+    def expose_http(
+        self,
+        port: int,
+        *,
+        service_name: str = "http",
+        domain: bool = False,
+    ) -> str:
+        if self._session is None:
+            raise SandboxError("sandbox context has not been entered")
+        return self._session.expose_http(port, service_name=service_name, domain=domain)
 
 
 _PYTHON_CLOUDPICKLE_BOOTSTRAP = (

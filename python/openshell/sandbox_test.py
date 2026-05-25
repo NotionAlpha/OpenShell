@@ -139,6 +139,86 @@ def test_from_active_cluster_prefers_openshell_gateway_env(
         client.close()
 
 
+class _FakeExposeStub:
+    """Fake stub that records ExposeService calls and returns a canned response."""
+
+    def __init__(self, url: str = "https://gateway.example/abc") -> None:
+        self._url = url
+        self.request: openshell_pb2.ExposeServiceRequest | None = None
+
+    def ExposeService(
+        self,
+        request: openshell_pb2.ExposeServiceRequest,
+        timeout: float | None = None,
+    ) -> openshell_pb2.ServiceEndpointResponse:
+        self.request = request
+        _ = timeout
+        return openshell_pb2.ServiceEndpointResponse(url=self._url)
+
+
+def _client_with_expose_stub(stub: _FakeExposeStub) -> SandboxClient:
+    client = cast("SandboxClient", object.__new__(SandboxClient))
+    client._timeout = 30.0
+    client._stub = cast("Any", stub)
+    return client
+
+
+def _make_sandbox_ref(name: str = "swift-koala", uid: str = "uid-1") -> Any:
+    from openshell.sandbox import SandboxRef
+
+    return SandboxRef(id=uid, name=name, phase=0)
+
+
+def test_session_expose_http_returns_url_from_fake_stub() -> None:
+    from openshell.sandbox import SandboxSession
+
+    stub = _FakeExposeStub(url="https://gateway.example/abc")
+    client = _client_with_expose_stub(stub)
+    ref = _make_sandbox_ref()
+
+    url = SandboxSession(client, ref).expose_http(8080)
+
+    assert url == "https://gateway.example/abc"
+
+
+def test_session_expose_http_passes_sandbox_name_and_port() -> None:
+    from openshell.sandbox import SandboxSession
+
+    stub = _FakeExposeStub()
+    client = _client_with_expose_stub(stub)
+    ref = _make_sandbox_ref(name="swift-koala", uid="uid-1")
+
+    SandboxSession(client, ref).expose_http(8080)
+
+    assert stub.request is not None
+    assert stub.request.sandbox == "swift-koala"  # name, NOT id
+    assert stub.request.target_port == 8080
+    assert stub.request.service == "http"  # default service_name
+
+
+def test_session_expose_http_uses_custom_service_name() -> None:
+    from openshell.sandbox import SandboxSession
+
+    stub = _FakeExposeStub()
+    client = _client_with_expose_stub(stub)
+    ref = _make_sandbox_ref()
+
+    SandboxSession(client, ref).expose_http(9090, service_name="grpc")
+
+    assert stub.request is not None
+    assert stub.request.service == "grpc"
+
+
+def test_sandbox_expose_http_raises_when_not_entered() -> None:
+    import pytest
+
+    from openshell.sandbox import Sandbox, SandboxError
+
+    sb = Sandbox()
+    with pytest.raises(SandboxError, match="context has not been entered"):
+        sb.expose_http(8080)
+
+
 def test_inference_set_cluster_forwards_no_verify_flag() -> None:
     stub = _FakeInferenceStub()
     client = cast("InferenceRouteClient", object.__new__(InferenceRouteClient))
