@@ -18,6 +18,8 @@ from .sandbox import (
     TlsConfig,
 )
 
+from ._proto import sandbox_pb2, openshell_pb2, datamodel_pb2  # noqa: F401
+
 try:
     from importlib.metadata import version
 
@@ -37,4 +39,7 @@ __all__ = [
     "SandboxSession",
     "TlsConfig",
     "__version__",
+    "sandbox_pb2",
+    "openshell_pb2",
+    "datamodel_pb2",
 ]
