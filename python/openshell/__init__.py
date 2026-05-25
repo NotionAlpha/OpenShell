@@ -20,6 +20,7 @@ from .sandbox import (
 )
 
 from ._proto import sandbox_pb2, openshell_pb2, datamodel_pb2  # noqa: F401
+from .policy import policy_from_network_allow  # noqa: F401
 
 try:
     from importlib.metadata import version
@@ -44,4 +45,5 @@ __all__ = [
     "sandbox_pb2",
     "openshell_pb2",
     "datamodel_pb2",
+    "policy_from_network_allow",
 ]
