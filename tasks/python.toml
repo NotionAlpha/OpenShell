@@ -217,15 +217,14 @@ run = "uv run ty check {{vars.python_paths}}"
 hide = true
 
 ["python:wheel:verify"]
-description = "Assert the built wheel contains the generated _pb2 proto stubs"
-depends = ["build:python:wheel"]
+description = "Assert a built wheel in target/wheels contains the generated _pb2 proto stubs (build the wheel first)"
 run = '''
 #!/usr/bin/env bash
 set -euo pipefail
 WHEEL_DIR="${WHEEL_DIR:-target/wheels}"
 WHEEL=$(ls "$WHEEL_DIR"/openshell-*-*.whl 2>/dev/null | head -1)
 if [ -z "$WHEEL" ]; then
-  echo "no wheel found in $WHEEL_DIR" >&2
+  echo "no wheel found in $WHEEL_DIR — build one first (e.g. mise run build:python:wheel)" >&2
   exit 1
 fi
 echo "verifying wheel contents: $WHEEL"
